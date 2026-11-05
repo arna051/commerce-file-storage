@@ -37,4 +37,32 @@ describe.skipIf(!enabled)('S3StorageProvider integration', () => {
     expect(file.sha256).toBe(createHash('sha256').update(bytes).digest('hex'));
     expect(file.sha256).toHaveLength(64);
   });
+
+  it('supports put, head, ranged reads, signed downloads, deletion, and multipart abort', async () => {
+    const provider = new S3StorageProvider({ bucket, client, prefix: 'tenant/' });
+    const bytes = Buffer.from('real minio range content');
+    await expect(
+      provider.put({
+        key: 'direct.txt',
+        body: Readable.from(bytes),
+        contentType: 'text/plain',
+        contentLength: bytes.length,
+      }),
+    ).resolves.toMatchObject({ key: 'direct.txt', size: bytes.length });
+    expect(await provider.head('direct.txt')).toMatchObject({ size: bytes.length });
+    const range = await provider.getStream('direct.txt', { start: 5, end: 9 });
+    const chunks: Buffer[] = [];
+    for await (const chunk of range) chunks.push(Buffer.from(chunk as Uint8Array));
+    expect(Buffer.concat(chunks).toString()).toBe('minio');
+    await expect(
+      provider.signDownload({ key: 'direct.txt', expiresInSeconds: 60, filename: 'my file.txt' }),
+    ).resolves.toContain('X-Amz-Signature=');
+    const multipart = await provider.createMultipart({
+      key: 'aborted.bin',
+      contentType: 'application/octet-stream',
+    });
+    await provider.abortMultipart({ key: 'aborted.bin', uploadId: multipart.uploadId });
+    await provider.delete('direct.txt');
+    expect(await provider.head('direct.txt')).toBeNull();
+  });
 });

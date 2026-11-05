@@ -268,4 +268,223 @@ describe('FileStorage', () => {
       code: 'ACCESS_DENIED',
     });
   });
+
+  it('creates signed downloads with bounded expiry and the original filename', async () => {
+    const { storage, provider } = setup({ signedUrlMaxExpirySeconds: 600 });
+    const sign = vi.spyOn(provider, 'signDownload');
+    const file = await storage.upload({
+      namespace: 'business/1',
+      stream: Readable.from(jpeg),
+      filename: 'product photo.jpg',
+      contentType: 'image/jpeg',
+      contentLength: jpeg.length,
+    });
+    await expect(storage.createSignedDownload(file.id, null, 3600)).resolves.toContain(
+      'expires=600',
+    );
+    expect(sign).toHaveBeenCalledWith({
+      key: file.objectKey,
+      expiresInSeconds: 600,
+      filename: 'product photo.jpg',
+    });
+  });
+
+  it('rejects signed downloads when unsupported or the file is unavailable', async () => {
+    const first = setup();
+    const file = await first.storage.upload({
+      namespace: 'business/1',
+      stream: Readable.from(jpeg),
+      contentType: 'image/jpeg',
+      contentLength: jpeg.length,
+    });
+    Object.defineProperty(first.provider, 'signDownload', { value: undefined });
+    await expect(first.storage.createSignedDownload(file.id, null)).rejects.toMatchObject({
+      code: 'UNSUPPORTED_OPERATION',
+    });
+    const owner = { type: 'user' as const, id: 'owner' };
+    const second = setup();
+    const deleted = await second.storage.upload({
+      namespace: 'business/1',
+      stream: Readable.from(jpeg),
+      contentType: 'image/jpeg',
+      contentLength: jpeg.length,
+      access: { mode: 'restricted', owner, policyVersion: 1 },
+    });
+    await second.storage.softDelete(deleted.id, owner);
+    await expect(second.storage.createSignedDownload(deleted.id, owner)).rejects.toMatchObject({
+      code: 'ACCESS_DENIED',
+    });
+  });
+
+  it('enforces maximum size before and while streaming and removes partial bytes', async () => {
+    const { storage, metadata, provider } = setup({ maxFileSize: 6 });
+    await expect(
+      storage.upload({
+        namespace: 'business/1',
+        stream: Readable.from(jpeg),
+        contentType: 'image/jpeg',
+        contentLength: jpeg.length,
+      }),
+    ).rejects.toMatchObject({ code: 'FILE_TOO_LARGE' });
+    await expect(
+      storage.upload({
+        namespace: 'business/1',
+        stream: Readable.from(jpeg),
+        contentType: 'image/jpeg',
+        contentLength: 6,
+      }),
+    ).rejects.toMatchObject({ code: 'FILE_TOO_LARGE' });
+    expect(provider.objects.size).toBe(0);
+    expect([...metadata.files.values()].at(-1)?.lifecycleStatus).toBe('failed');
+  });
+
+  it.each([
+    ['quarantine', 'quarantined'],
+    ['reject', 'failed'],
+  ] as const)('applies the %s scanner-unavailable policy', async (policy, lifecycleStatus) => {
+    const { storage, metadata, provider } = setup({
+      scannerUnavailablePolicy: policy,
+      scanner: { name: 'offline', scan: vi.fn().mockRejectedValue(new Error('offline')) },
+    });
+    const operation = storage.upload({
+      namespace: 'business/1',
+      stream: Readable.from(jpeg),
+      contentType: 'image/jpeg',
+      contentLength: jpeg.length,
+    });
+    if (policy === 'reject')
+      await expect(operation).rejects.toMatchObject({ code: 'SCAN_UNAVAILABLE' });
+    else await expect(operation).resolves.toMatchObject({ lifecycleStatus });
+    expect([...metadata.files.values()][0]?.lifecycleStatus).toBe(lifecycleStatus);
+    expect(provider.objects.size).toBe(policy === 'reject' ? 0 : 1);
+  });
+
+  it('marks multipart size mismatches failed and prevents abort after completion', async () => {
+    const { storage, metadata } = setup();
+    const mismatch = await storage.createMultipartUpload({
+      namespace: 'business/1',
+      contentType: 'application/pdf',
+      contentLength: 100,
+      idempotencyKey: 'size-mismatch',
+    });
+    await storage.uploadPart(mismatch.id, 1, Readable.from('%PDF short'), 10);
+    await expect(storage.completeMultipartUpload(mismatch.id)).rejects.toMatchObject({
+      code: 'INVALID_INPUT',
+    });
+    expect((await metadata.getUpload(mismatch.id))?.status).toBe('failed');
+
+    const bytes = Buffer.from('%PDF complete');
+    const complete = await storage.createMultipartUpload({
+      namespace: 'business/1',
+      contentType: 'application/pdf',
+      contentLength: bytes.length,
+      idempotencyKey: 'abort-completed',
+    });
+    await storage.uploadPart(complete.id, 1, Readable.from(bytes), bytes.length);
+    await storage.completeMultipartUpload(complete.id);
+    await expect(storage.abortMultipartUpload(complete.id)).rejects.toMatchObject({
+      code: 'UPLOAD_STATE_CONFLICT',
+    });
+  });
+
+  it('restores generated variants together with their parent', async () => {
+    const processor = {
+      name: 'thumbnail',
+      supports: () => true,
+      process: vi
+        .fn()
+        .mockResolvedValue([
+          { name: 'thumb', contentType: 'image/jpeg', stream: Readable.from(jpeg) },
+        ]),
+    };
+    const { storage, metadata } = setup({ processors: [processor] });
+    const owner = { type: 'user' as const, id: 'owner' };
+    const file = await storage.upload({
+      namespace: 'business/1',
+      stream: Readable.from(jpeg),
+      contentType: 'image/jpeg',
+      contentLength: jpeg.length,
+      access: { mode: 'restricted', owner, policyVersion: 1 },
+    });
+    const childId = file.variants[0]!.fileId;
+    await storage.softDelete(file.id, owner);
+    expect((await metadata.getFile(childId))?.lifecycleStatus).toBe('soft-deleted');
+    await storage.restore(file.id, owner);
+    expect((await metadata.getFile(childId))?.lifecycleStatus).toBe('available');
+  });
+
+  it('does not roll back stored files when an event sink is unavailable', async () => {
+    const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const { storage, provider } = setup({
+      logger,
+      events: { publish: vi.fn().mockRejectedValue(new Error('event bus offline')) },
+    });
+    await expect(
+      storage.upload({
+        namespace: 'business/1',
+        stream: Readable.from(jpeg),
+        contentType: 'image/jpeg',
+        contentLength: jpeg.length,
+      }),
+    ).resolves.toMatchObject({ lifecycleStatus: 'available' });
+    expect(provider.objects.size).toBe(1);
+    expect(logger.error).toHaveBeenCalledWith(
+      'File event publication failed',
+      expect.objectContaining({ eventType: 'file.uploaded' }),
+    );
+  });
+
+  it('authorizes every multipart action against the owning file', async () => {
+    const metadata = new MemoryMetadataStore();
+    const storage = createFileStorage({
+      provider: new MemoryBlobProvider(),
+      metadata,
+      authorizer: new MongooseAclAuthorizer(metadata),
+      logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    });
+    const owner = { type: 'user' as const, id: 'owner' };
+    const session = await storage.createMultipartUpload({
+      namespace: 'business/1',
+      contentType: 'application/pdf',
+      contentLength: 9,
+      idempotencyKey: 'secured-upload',
+      access: { mode: 'restricted', owner, policyVersion: 1 },
+    });
+    const stranger = { type: 'user' as const, id: 'stranger' };
+    await expect(
+      storage.uploadPart(session.id, 1, Readable.from('%PDF part'), 9, {
+        principal: stranger,
+      }),
+    ).rejects.toMatchObject({ code: 'ACCESS_DENIED' });
+    await expect(storage.resumeMultipartUpload(session.id, stranger)).rejects.toMatchObject({
+      code: 'ACCESS_DENIED',
+    });
+    await storage.uploadPart(session.id, 1, Readable.from('%PDF part'), 9, { principal: owner });
+    await expect(storage.completeMultipartUpload(session.id, owner)).resolves.toMatchObject({
+      lifecycleStatus: 'available',
+    });
+  });
+
+  it('supports exact MIME policies and explicit SVG opt-in', async () => {
+    const pdf = Buffer.from('%PDF exact');
+    const exact = setup({ allowedContentTypes: ['application/pdf'] });
+    await expect(
+      exact.storage.upload({
+        namespace: 'business/1',
+        stream: Readable.from(pdf),
+        contentType: 'application/pdf',
+        contentLength: pdf.length,
+      }),
+    ).resolves.toMatchObject({ contentType: 'application/pdf' });
+    const svg = Buffer.from('<svg></svg>');
+    const optedIn = setup({ allowedContentTypes: ['image/svg+xml'], rejectSvg: false });
+    await expect(
+      optedIn.storage.upload({
+        namespace: 'business/1',
+        stream: Readable.from(svg),
+        contentType: 'image/svg+xml',
+        contentLength: svg.length,
+      }),
+    ).resolves.toMatchObject({ contentType: 'image/svg+xml' });
+  });
 });

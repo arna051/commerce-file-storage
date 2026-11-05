@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 - Unreleased
+## 0.1.0 - 2026-11-05
 
 - Initial provider-neutral storage orchestration.
 - S3-compatible MinIO provider and resumable multipart uploads.

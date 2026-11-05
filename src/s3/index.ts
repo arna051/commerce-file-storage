@@ -104,7 +104,13 @@ export class S3StorageProvider implements BlobProvider {
         ...(out.Metadata ? { metadata: out.Metadata } : {}),
       };
     } catch (error) {
-      if ((error as { name?: string }).name === 'NotFound') return null;
+      const failure = error as { name?: string; $metadata?: { httpStatusCode?: number } };
+      if (
+        failure.name === 'NotFound' ||
+        failure.name === 'NoSuchKey' ||
+        failure.$metadata?.httpStatusCode === 404
+      )
+        return null;
       throw error;
     }
   }

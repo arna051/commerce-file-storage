@@ -21,11 +21,11 @@ try {
   });
   writeFileSync(
     join(consumer, 'esm.mjs'),
-    "import { createFileStorage } from 'commerce-file-storage';\nimport { MemoryMetadataStore } from 'commerce-file-storage/testing';\nif (typeof createFileStorage !== 'function' || !MemoryMetadataStore) process.exit(1);\n",
+    "import { createFileStorage } from 'commerce-file-storage';\nimport { MemoryMetadataStore } from 'commerce-file-storage/testing';\nconst paths = ['s3', 'mongoose', 'clamav', 'sharp', 'nestjs', 'testing'];\nfor (const path of paths) import.meta.resolve(`commerce-file-storage/${path}`);\nif (typeof createFileStorage !== 'function' || !MemoryMetadataStore) process.exit(1);\n",
   );
   writeFileSync(
     join(consumer, 'cjs.cjs'),
-    "const { createFileStorage } = require('commerce-file-storage');\nconst { MemoryMetadataStore } = require('commerce-file-storage/testing');\nif (typeof createFileStorage !== 'function' || !MemoryMetadataStore) process.exit(1);\n",
+    "const { createFileStorage } = require('commerce-file-storage');\nconst { MemoryMetadataStore } = require('commerce-file-storage/testing');\nfor (const path of ['s3', 'mongoose', 'clamav', 'sharp', 'nestjs', 'testing']) require.resolve(`commerce-file-storage/${path}`);\nif (typeof createFileStorage !== 'function' || !MemoryMetadataStore) process.exit(1);\n",
   );
   execFileSync(process.execPath, ['esm.mjs'], { cwd: consumer, stdio: 'inherit' });
   execFileSync(process.execPath, ['cjs.cjs'], { cwd: consumer, stdio: 'inherit' });

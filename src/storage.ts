@@ -198,7 +198,7 @@ export class FileStorage {
       contentType: parsed.contentType,
     });
     const now = this.now();
-    return this.metadata.createUpload({
+    const session: UploadSession = {
       id: this.id(),
       fileId: file.id,
       idempotencyKey: parsed.idempotencyKey,
@@ -217,7 +217,26 @@ export class FileStorage {
       expiresAt: new Date(now.getTime() + this.config.uploadSessionTtlMs),
       createdAt: now,
       updatedAt: now,
-    });
+    };
+    try {
+      return await this.metadata.createUpload(session);
+    } catch (error) {
+      // Another request may have won the unique namespace/idempotency-key race.
+      const raced = await this.metadata
+        .findUploadByIdempotencyKey(parsed.namespace, parsed.idempotencyKey)
+        .catch(() => null);
+      if (!raced) throw error;
+      await this.provider
+        .abortMultipart({ key: file.objectKey, uploadId: created.uploadId })
+        .catch(() => undefined);
+      await this.failFile(file, error);
+      if (raced.expectedSize !== parsed.contentLength || raced.contentType !== parsed.contentType)
+        throw new FileStorageError(
+          'UPLOAD_STATE_CONFLICT',
+          'Idempotency key was concurrently used with different upload parameters',
+        );
+      return raced;
+    }
   }
 
   async uploadPart(
@@ -425,11 +444,21 @@ export class FileStorage {
         'FILE_NOT_FOUND',
         'File bytes have already been permanently deleted',
       );
-    return this.metadata.updateFile(file.id, file.updatedAt, {
+    const restored = await this.metadata.updateFile(file.id, file.updatedAt, {
       lifecycleStatus: 'available',
       deletedAt: null,
       updatedAt: this.now(),
     });
+    for (const variant of file.variants) {
+      const child = await this.metadata.getFile(variant.fileId);
+      if (child?.lifecycleStatus === 'soft-deleted' && (await this.provider.head(child.objectKey)))
+        await this.metadata.updateFile(child.id, child.updatedAt, {
+          lifecycleStatus: 'available',
+          deletedAt: null,
+          updatedAt: this.now(),
+        });
+    }
+    return restored;
   }
 
   async cleanupExpiredUploads(options: { before?: Date; limit?: number } = {}) {
@@ -765,7 +794,16 @@ export class FileStorage {
     });
   }
   private async emit(type: string, fileId: string, data: Readonly<Record<string, unknown>>) {
-    await this.events?.publish({ id: this.id(), type, fileId, occurredAt: this.now(), data });
+    if (!this.events) return;
+    try {
+      await this.events.publish({ id: this.id(), type, fileId, occurredAt: this.now(), data });
+    } catch (error) {
+      this.logger.error('File event publication failed', {
+        fileId,
+        eventType: type,
+        errorCode: error instanceof FileStorageError ? error.code : 'UNKNOWN',
+      });
+    }
   }
 }
 
