@@ -1,0 +1,182 @@
+{
+  "name": "commerce-file-storage",
+  "version": "0.1.0",
+  "description": "Provider-neutral ecommerce file storage with S3/MinIO, Mongoose, NestJS, resumable uploads, scanning, and image variants.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+    "SECURITY.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./s3": {
+      "import": {
+        "types": "./dist/s3/index.d.ts",
+        "default": "./dist/s3/index.js"
+      },
+      "require": {
+        "types": "./dist/s3/index.d.cts",
+        "default": "./dist/s3/index.cjs"
+      }
+    },
+    "./mongoose": {
+      "import": {
+        "types": "./dist/mongoose/index.d.ts",
+        "default": "./dist/mongoose/index.js"
+      },
+      "require": {
+        "types": "./dist/mongoose/index.d.cts",
+        "default": "./dist/mongoose/index.cjs"
+      }
+    },
+    "./clamav": {
+      "import": {
+        "types": "./dist/clamav/index.d.ts",
+        "default": "./dist/clamav/index.js"
+      },
+      "require": {
+        "types": "./dist/clamav/index.d.cts",
+        "default": "./dist/clamav/index.cjs"
+      }
+    },
+    "./sharp": {
+      "import": {
+        "types": "./dist/sharp/index.d.ts",
+        "default": "./dist/sharp/index.js"
+      },
+      "require": {
+        "types": "./dist/sharp/index.d.cts",
+        "default": "./dist/sharp/index.cjs"
+      }
+    },
+    "./nestjs": {
+      "import": {
+        "types": "./dist/nestjs/index.d.ts",
+        "default": "./dist/nestjs/index.js"
+      },
+      "require": {
+        "types": "./dist/nestjs/index.d.cts",
+        "default": "./dist/nestjs/index.cjs"
+      }
+    },
+    "./testing": {
+      "import": {
+        "types": "./dist/testing/index.d.ts",
+        "default": "./dist/testing/index.js"
+      },
+      "require": {
+        "types": "./dist/testing/index.d.cts",
+        "default": "./dist/testing/index.cjs"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "tsup",
+    "clean": "rimraf dist coverage *.tgz",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "test:integration": "RUN_INTEGRATION=1 vitest run test/integration",
+    "test:coverage": "vitest run --coverage",
+    "check": "npm run format:check && npm run lint && npm run typecheck && npm test && npm run build",
+    "prepack": "npm run check",
+    "package:check": "npm pack --dry-run",
+    "package:consumer": "npm run build && node scripts/check-package.mjs"
+  },
+  "dependencies": {
+    "zod": "^4.6.7"
+  },
+  "peerDependencies": {
+    "@aws-sdk/client-s3": "^3.900.0",
+    "@aws-sdk/s3-request-presigner": "^3.900.0",
+    "@nestjs/common": ">=10 <13",
+    "@nestjs/core": ">=10 <13",
+    "mongoose": ">=8 <10",
+    "reflect-metadata": "^0.2.2",
+    "sharp": ">=0.33 <1"
+  },
+  "peerDependenciesMeta": {
+    "@aws-sdk/client-s3": {
+      "optional": true
+    },
+    "@aws-sdk/s3-request-presigner": {
+      "optional": true
+    },
+    "@nestjs/common": {
+      "optional": true
+    },
+    "@nestjs/core": {
+      "optional": true
+    },
+    "mongoose": {
+      "optional": true
+    },
+    "reflect-metadata": {
+      "optional": true
+    },
+    "sharp": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@aws-sdk/client-s3": "^3.1162.0",
+    "@aws-sdk/s3-request-presigner": "^3.1162.0",
+    "@eslint/js": "^10.0.1",
+    "@nestjs/common": "^12.3.3",
+    "@nestjs/core": "^12.3.3",
+    "@nestjs/testing": "^12.3.3",
+    "@types/node": "^24.10.0",
+    "@vitest/coverage-v8": "^5.1.0",
+    "eslint": "^10.14.0",
+    "eslint-config-prettier": "^10.1.8",
+    "mongoose": "^9.12.0",
+    "prettier": "^3.9.0",
+    "reflect-metadata": "^0.2.2",
+    "rimraf": "^6.1.2",
+    "sharp": "^0.35.5",
+    "tsup": "^9.0.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.46.0",
+    "vitest": "^5.1.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/arna051/commerce-file-storage.git"
+  },
+  "keywords": [
+    "file-storage",
+    "minio",
+    "s3",
+    "mongoose",
+    "nestjs",
+    "multipart",
+    "ecommerce"
+  ]
+}
