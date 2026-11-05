@@ -1,6 +1,6 @@
 {
   "name": "commerce-file-storage",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Provider-neutral ecommerce file storage with S3/MinIO, Mongoose, NestJS, resumable uploads, scanning, and image variants.",
   "license": "MIT",
   "type": "module",

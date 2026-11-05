@@ -9,6 +9,7 @@ import type {
   FileEventSink,
   FileProcessor,
   FileRecord,
+  FileRetentionInput,
   FileStorageLogger,
   MalwareScanner,
   MetadataStore,
@@ -40,6 +41,7 @@ export interface CreateFileStorageOptions {
   maxFileSize?: number;
   multipartPartSize?: number;
   uploadSessionTtlMs?: number;
+  temporaryFileTtlMs?: number;
   signedUrlMaxExpirySeconds?: number;
   scannerUnavailablePolicy?: ScannerUnavailablePolicy;
   allowedContentTypes?: readonly string[];
@@ -56,6 +58,7 @@ export interface UploadFileInput {
   contentLength: number;
   purpose?: string;
   access?: FileAccess;
+  retention?: FileRetentionInput;
   metadata?: Readonly<Record<string, unknown>>;
   references?: readonly { type: string; id: string; role?: string }[];
   signal?: AbortSignal;
@@ -69,6 +72,15 @@ export interface CreateMultipartUploadInput extends Omit<UploadFileInput, 'strea
 function keyFor(namespace: string, fileId: string): string {
   const tenant = createHash('sha256').update(namespace).digest('hex').slice(0, 24);
   return `objects/${tenant}/${fileId}`;
+}
+
+function retentionMatches(existing: FileRetentionInput, requested: FileRetentionInput): boolean {
+  if (existing.mode !== requested.mode) return false;
+  if (existing.mode === 'permanent' || requested.mode === 'permanent') return true;
+  return (
+    requested.expiresAt === undefined ||
+    existing.expiresAt?.getTime() === requested.expiresAt.getTime()
+  );
 }
 
 function createMeter(maxBytes: number) {
@@ -184,7 +196,8 @@ export class FileStorage {
     if (existing) {
       if (
         existing.expectedSize !== parsed.contentLength ||
-        existing.contentType !== parsed.contentType
+        existing.contentType !== parsed.contentType ||
+        !retentionMatches(existing.retention ?? { mode: 'permanent' }, parsed.retention)
       )
         throw new FileStorageError(
           'UPLOAD_STATE_CONFLICT',
@@ -213,6 +226,7 @@ export class FileStorage {
       ...(parsed.filename ? { filename: parsed.filename } : {}),
       ...(parsed.purpose ? { purpose: parsed.purpose } : {}),
       access: file.access,
+      retention: file.retention,
       parts: [],
       expiresAt: new Date(now.getTime() + this.config.uploadSessionTtlMs),
       createdAt: now,
@@ -230,7 +244,11 @@ export class FileStorage {
         .abortMultipart({ key: file.objectKey, uploadId: created.uploadId })
         .catch(() => undefined);
       await this.failFile(file, error);
-      if (raced.expectedSize !== parsed.contentLength || raced.contentType !== parsed.contentType)
+      if (
+        raced.expectedSize !== parsed.contentLength ||
+        raced.contentType !== parsed.contentType ||
+        !retentionMatches(raced.retention ?? { mode: 'permanent' }, parsed.retention)
+      )
         throw new FileStorageError(
           'UPLOAD_STATE_CONFLICT',
           'Idempotency key was concurrently used with different upload parameters',
@@ -374,9 +392,19 @@ export class FileStorage {
         'UNSUPPORTED_OPERATION',
         'Provider does not support signed downloads',
       );
+    const retentionExpiry =
+      file.retention.mode === 'temporary'
+        ? Math.floor((file.retention.expiresAt.getTime() - this.now().getTime()) / 1000)
+        : this.config.signedUrlMaxExpirySeconds;
+    if (retentionExpiry < 1)
+      throw new FileStorageError('ACCESS_DENIED', 'Temporary file has expired');
     return this.provider.signDownload({
       key: file.objectKey,
-      expiresInSeconds: Math.min(expiresInSeconds, this.config.signedUrlMaxExpirySeconds),
+      expiresInSeconds: Math.min(
+        expiresInSeconds,
+        this.config.signedUrlMaxExpirySeconds,
+        retentionExpiry,
+      ),
       ...(file.originalFilename ? { filename: file.originalFilename } : {}),
     });
   }
@@ -407,6 +435,33 @@ export class FileStorage {
     const file = await this.requireFile(fileId);
     await this.assertAuthorized(actor, 'manage-access', file);
     await this.metadata.revokeGrant(fileId, principal);
+  }
+
+  async markPermanent(fileId: string, actor: AccessPrincipal): Promise<FileRecord> {
+    const file = await this.requireFile(fileId);
+    await this.assertAuthorized(actor, 'update', file);
+    if (file.retention.mode === 'permanent') return file;
+    if (file.retention.expiresAt.getTime() <= this.now().getTime())
+      throw new FileStorageError('UPLOAD_STATE_CONFLICT', 'Expired files cannot be made permanent');
+    if (!['available', 'quarantined'].includes(file.lifecycleStatus))
+      throw new FileStorageError(
+        'UPLOAD_STATE_CONFLICT',
+        'Only active temporary files can be made permanent',
+      );
+    const permanent = await this.metadata.updateFile(file.id, file.updatedAt, {
+      retention: { mode: 'permanent' },
+      updatedAt: this.now(),
+    });
+    for (const variant of file.variants) {
+      const child = await this.metadata.getFile(variant.fileId);
+      if (child?.retention.mode === 'temporary')
+        await this.metadata.updateFile(child.id, child.updatedAt, {
+          retention: { mode: 'permanent' },
+          updatedAt: this.now(),
+        });
+    }
+    await this.emit('file.marked-permanent', file.id, {});
+    return permanent;
   }
 
   async softDelete(fileId: string, actor: AccessPrincipal): Promise<FileRecord> {
@@ -496,6 +551,44 @@ export class FileStorage {
     return { examined: sessions.length, cleaned, failed };
   }
 
+  async cleanupExpiredTemporaryFiles(options: { before?: Date; limit?: number } = {}) {
+    const before = options.before ?? this.now();
+    const files = await this.metadata.findFiles({
+      lifecycleStatuses: ['available', 'quarantined'],
+      retentionMode: 'temporary',
+      expiresBefore: before,
+      limit: options.limit ?? 100,
+    });
+    let deleted = 0;
+    let failed = 0;
+    for (const file of files) {
+      try {
+        const claimedAt = this.now();
+        const claimed = await this.metadata.updateFile(file.id, file.updatedAt, {
+          lifecycleStatus: 'soft-deleted',
+          deletedAt: claimedAt,
+          updatedAt: claimedAt,
+        });
+        await this.provider.delete(file.objectKey);
+        await this.metadata.updateFile(claimed.id, claimed.updatedAt, {
+          lifecycleStatus: 'permanently-deleted',
+          updatedAt: this.now(),
+        });
+        await this.emit('file.temporary-expired', file.id, {
+          expiresAt: file.retention.mode === 'temporary' ? file.retention.expiresAt : undefined,
+        });
+        deleted++;
+      } catch (error) {
+        failed++;
+        this.logger.error('Temporary file cleanup failed', {
+          fileId: file.id,
+          errorCode: error instanceof FileStorageError ? error.code : 'UNKNOWN',
+        });
+      }
+    }
+    return { examined: files.length, deleted, failed };
+  }
+
   async purgeDeletedFiles(options: { before: Date; limit?: number }) {
     const files = await this.metadata.findFiles({
       lifecycleStatus: 'soft-deleted',
@@ -542,6 +635,15 @@ export class FileStorage {
       lifecycleStatus: 'pending',
       scanStatus: this.scanner ? 'pending' : 'not-required',
       processingStatus: this.processors.length ? 'pending' : 'not-required',
+      retention:
+        input.retention.mode === 'temporary'
+          ? {
+              mode: 'temporary',
+              expiresAt:
+                input.retention.expiresAt ??
+                new Date(now.getTime() + this.config.temporaryFileTtlMs),
+            }
+          : { mode: 'permanent' },
       access: input.access
         ? {
             mode: input.access.mode,
@@ -650,6 +752,7 @@ export class FileStorage {
             lifecycleStatus: 'available',
             scanStatus: 'not-required',
             processingStatus: 'not-required',
+            retention: current.retention,
             access: current.access,
             references: [{ type: 'variant-of', id: current.id, role: output.name }],
             variants: [],
@@ -763,6 +866,11 @@ export class FileStorage {
       });
   }
   private assertDownloadable(file: FileRecord) {
+    if (
+      file.retention.mode === 'temporary' &&
+      file.retention.expiresAt.getTime() <= this.now().getTime()
+    )
+      throw new FileStorageError('ACCESS_DENIED', 'Temporary file has expired');
     if (
       file.lifecycleStatus !== 'available' ||
       !['clean', 'not-required', 'skipped-unavailable'].includes(file.scanStatus)

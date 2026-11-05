@@ -179,6 +179,11 @@ describe('FileStorage', () => {
       contentType: 'application/pdf',
       contentLength: bytes.length,
       idempotencyKey: 'multipart-complete',
+      retention: { mode: 'temporary', expiresAt: new Date('2030-01-01T00:00:00.000Z') },
+    });
+    expect(session.retention).toEqual({
+      mode: 'temporary',
+      expiresAt: new Date('2030-01-01T00:00:00.000Z'),
     });
     await storage.uploadPart(session.id, 1, Readable.from(bytes), bytes.length);
     expect((await storage.resumeMultipartUpload(session.id)).parts).toHaveLength(1);
@@ -187,6 +192,7 @@ describe('FileStorage', () => {
       lifecycleStatus: 'available',
       contentType: 'application/pdf',
       size: bytes.length,
+      retention: { mode: 'temporary' },
     });
     expect(file.sha256).toMatch(/^[a-f0-9]{64}$/);
     expect((await storage.completeMultipartUpload(session.id)).id).toBe(file.id);
@@ -486,5 +492,130 @@ describe('FileStorage', () => {
         contentLength: svg.length,
       }),
     ).resolves.toMatchObject({ contentType: 'image/svg+xml' });
+  });
+
+  it('expires temporary files after seven days while preserving permanent files', async () => {
+    let now = new Date('2026-01-01T00:00:00.000Z');
+    const { storage, metadata, provider } = setup({ now: () => now });
+    const temporary = await storage.upload({
+      namespace: 'business/1',
+      stream: Readable.from(jpeg),
+      contentType: 'image/jpeg',
+      contentLength: jpeg.length,
+      retention: { mode: 'temporary' },
+    });
+    const permanent = await storage.upload({
+      namespace: 'business/1',
+      stream: Readable.from(jpeg),
+      contentType: 'image/jpeg',
+      contentLength: jpeg.length,
+    });
+    expect(temporary.retention).toEqual({
+      mode: 'temporary',
+      expiresAt: new Date('2026-01-08T00:00:00.000Z'),
+    });
+    expect(permanent.retention).toEqual({ mode: 'permanent' });
+    now = new Date('2026-01-08T00:00:00.001Z');
+    await expect(storage.openDownload(temporary.id)).rejects.toMatchObject({
+      code: 'ACCESS_DENIED',
+    });
+    await expect(
+      storage.markPermanent(temporary.id, { type: 'user', id: 'owner' }),
+    ).rejects.toMatchObject({ code: 'UPLOAD_STATE_CONFLICT' });
+    expect(await storage.cleanupExpiredTemporaryFiles()).toEqual({
+      examined: 1,
+      deleted: 1,
+      failed: 0,
+    });
+    expect((await metadata.getFile(temporary.id))?.lifecycleStatus).toBe('permanently-deleted');
+    expect((await metadata.getFile(permanent.id))?.lifecycleStatus).toBe('available');
+    expect(provider.objects.size).toBe(1);
+  });
+
+  it('never signs a temporary download beyond its retention deadline', async () => {
+    const now = new Date('2026-01-01T00:00:00.000Z');
+    const { storage, provider } = setup({ now: () => now });
+    const sign = vi.spyOn(provider, 'signDownload');
+    const file = await storage.upload({
+      namespace: 'business/1',
+      stream: Readable.from(jpeg),
+      contentType: 'image/jpeg',
+      contentLength: jpeg.length,
+      retention: { mode: 'temporary', expiresAt: new Date(now.getTime() + 60_000) },
+    });
+    await storage.createSignedDownload(file.id, null, 3600);
+    expect(sign).toHaveBeenCalledWith(expect.objectContaining({ expiresInSeconds: 60 }));
+  });
+
+  it('promotes temporary files and generated variants to permanent retention', async () => {
+    const processor = {
+      name: 'thumbnail',
+      supports: () => true,
+      process: vi
+        .fn()
+        .mockResolvedValue([
+          { name: 'thumb', contentType: 'image/jpeg', stream: Readable.from(jpeg) },
+        ]),
+    };
+    const { storage, metadata } = setup({ processors: [processor] });
+    const file = await storage.upload({
+      namespace: 'business/1',
+      stream: Readable.from(jpeg),
+      contentType: 'image/jpeg',
+      contentLength: jpeg.length,
+      retention: { mode: 'temporary', expiresAt: new Date('2027-01-02T00:00:00.000Z') },
+    });
+    const promoted = await storage.markPermanent(file.id, { type: 'user', id: 'owner' });
+    expect(promoted.retention).toEqual({ mode: 'permanent' });
+    expect((await metadata.getFile(file.variants[0]!.fileId))?.retention).toEqual({
+      mode: 'permanent',
+    });
+    expect(
+      await storage.cleanupExpiredTemporaryFiles({ before: new Date('2028-01-01T00:00:00.000Z') }),
+    ).toEqual({ examined: 0, deleted: 0, failed: 0 });
+  });
+
+  it('leaves metadata recoverably soft-deleted when temporary byte deletion fails', async () => {
+    const { storage, metadata, provider } = setup();
+    const file = await storage.upload({
+      namespace: 'business/1',
+      stream: Readable.from(jpeg),
+      contentType: 'image/jpeg',
+      contentLength: jpeg.length,
+      retention: { mode: 'temporary', expiresAt: new Date(0) },
+    });
+    vi.spyOn(provider, 'delete').mockRejectedValueOnce(new Error('MinIO unavailable'));
+    expect(await storage.cleanupExpiredTemporaryFiles()).toEqual({
+      examined: 1,
+      deleted: 0,
+      failed: 1,
+    });
+    expect((await metadata.getFile(file.id))?.lifecycleStatus).toBe('soft-deleted');
+    expect(provider.objects.has(file.objectKey)).toBe(true);
+  });
+
+  it('requires update authorization before making a temporary file permanent', async () => {
+    const metadata = new MemoryMetadataStore();
+    const storage = createFileStorage({
+      provider: new MemoryBlobProvider(),
+      metadata,
+      authorizer: new MongooseAclAuthorizer(metadata),
+      logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    });
+    const owner = { type: 'user' as const, id: 'owner' };
+    const file = await storage.upload({
+      namespace: 'business/1',
+      stream: Readable.from(jpeg),
+      contentType: 'image/jpeg',
+      contentLength: jpeg.length,
+      access: { mode: 'restricted', owner, policyVersion: 1 },
+      retention: { mode: 'temporary' },
+    });
+    await expect(
+      storage.markPermanent(file.id, { type: 'user', id: 'stranger' }),
+    ).rejects.toMatchObject({ code: 'ACCESS_DENIED' });
+    await expect(storage.markPermanent(file.id, owner)).resolves.toMatchObject({
+      retention: { mode: 'permanent' },
+    });
   });
 });

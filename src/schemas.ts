@@ -14,6 +14,10 @@ export const fileAccessSchema = z.object({
   owner: principalRefSchema.optional(),
   policyVersion: z.number().int().positive().default(1),
 });
+export const fileRetentionSchema = z.discriminatedUnion('mode', [
+  z.object({ mode: z.literal('permanent') }),
+  z.object({ mode: z.literal('temporary'), expiresAt: z.date().optional() }),
+]);
 export const uploadInputSchema = z.object({
   namespace: safeId,
   filename: z.string().trim().min(1).max(512).optional(),
@@ -21,6 +25,7 @@ export const uploadInputSchema = z.object({
   contentLength: z.number().int().positive(),
   purpose: safeId.optional(),
   access: fileAccessSchema.optional(),
+  retention: fileRetentionSchema.default({ mode: 'permanent' }),
   metadata: z.record(z.string(), z.unknown()).default({}),
   references: z
     .array(z.object({ type: safeId, id: safeId, role: safeId.optional() }))
@@ -52,6 +57,11 @@ export const fileStorageOptionsSchema = z.object({
     .int()
     .positive()
     .default(24 * 60 * 60 * 1000),
+  temporaryFileTtlMs: z
+    .number()
+    .int()
+    .positive()
+    .default(7 * 24 * 60 * 60 * 1000),
   signedUrlMaxExpirySeconds: z
     .number()
     .int()

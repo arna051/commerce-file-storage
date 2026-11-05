@@ -6,6 +6,7 @@ Server-side TypeScript file storage for ecommerce applications. It stores immuta
 
 - Streamed uploads and downloads with byte limits and SHA-256 hashing
 - Retryable, persistent S3 multipart uploads
+- Seven-day temporary files with safe promotion to permanent retention
 - Private-by-default access with user, group, role, and service grants
 - Optional ClamAV scanning with explicit `warn-and-allow`, `quarantine`, or `reject` behavior
 - Sharp image variants selected by file purpose
@@ -99,6 +100,33 @@ const completed = await files.completeMultipartUpload(resumed.id);
 
 S3 requires all non-final parts to be at least 5 MiB. A live HTTP request cannot magically resume after the client loses its source; the caller must retain a seekable source and resend missing part numbers.
 
+## Temporary files
+
+Uploads are permanent by default. Mark an upload as temporary to give it a seven-day lifetime;
+set `temporaryFileTtlMs` on `createFileStorage` to change the default, or provide an explicit
+`expiresAt` for one file. Multipart uploads support the same `retention` input.
+
+```ts
+const temporary = await files.upload({
+  namespace: 'business/business-1',
+  stream: request,
+  contentType: 'image/jpeg',
+  contentLength,
+  retention: { mode: 'temporary' },
+});
+
+// Keep it after the user attaches it to a permanent business record.
+await files.markPermanent(temporary.id, actor);
+
+// Run from a trusted scheduled job. Defaults to now and a batch size of 100.
+await files.cleanupExpiredTemporaryFiles({ limit: 500 });
+```
+
+Cleanup first claims the expired record, then deletes its object, and only then marks its metadata
+permanently deleted. A failed object deletion remains recoverably soft-deleted for the existing
+purge job. Do not configure a MongoDB TTL index for file records: MongoDB cannot delete the MinIO
+object and would create orphaned bytes.
+
 ## Authorization
 
 The package uses principal/action/resource/context semantics. The host must authenticate requests and pass a verified principal. Missing authorization adapters mean trusted-server mode, so applications exposing user requests should configure an authorizer.
@@ -148,7 +176,7 @@ Inject with `@InjectFileStorage()`. The module deliberately registers no public 
 
 ## Consistency and cleanup
 
-MongoDB and S3 do not share a transaction. Records use explicit pending/finalizing/available/failed states and optimistic updates. Applications should schedule reconciliation of expired upload sessions and soft-deleted objects. Bucket versioning and delayed physical deletion are recommended. Never treat bucket listings as the metadata database.
+MongoDB and S3 do not share a transaction. Records use explicit pending/finalizing/available/failed states and optimistic updates. Applications should schedule reconciliation of expired upload sessions, temporary files, and soft-deleted objects. Bucket versioning and delayed physical deletion are recommended. Never treat bucket listings as the metadata database.
 
 ## License
 

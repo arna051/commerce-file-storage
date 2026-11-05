@@ -5,6 +5,10 @@ export type FileLifecycleStatus =
 export type ScanStatus =
   'not-required' | 'pending' | 'clean' | 'infected' | 'error' | 'skipped-unavailable';
 export type ProcessingStatus = 'not-required' | 'pending' | 'completed' | 'partial' | 'failed';
+export type FileRetentionMode = 'permanent' | 'temporary';
+export type FileRetention = { mode: 'permanent' } | { mode: 'temporary'; expiresAt: Date };
+export type FileRetentionInput =
+  { mode: 'permanent' } | { mode: 'temporary'; expiresAt?: Date | undefined };
 export type AccessMode = 'public' | 'authenticated' | 'restricted';
 export type PrincipalType = 'user' | 'group' | 'role' | 'service';
 export type FileAction = 'read' | 'download' | 'update' | 'delete' | 'share' | 'manage-access';
@@ -50,6 +54,7 @@ export interface FileRecord {
   lifecycleStatus: FileLifecycleStatus;
   scanStatus: ScanStatus;
   processingStatus: ProcessingStatus;
+  retention: FileRetention;
   access: FileAccess;
   references: readonly FileReference[];
   variants: readonly FileVariant[];
@@ -91,6 +96,7 @@ export interface UploadSession {
   filename?: string;
   purpose?: string;
   access: FileAccess;
+  retention: FileRetention;
   parts: readonly MultipartPart[];
   expiresAt: Date;
   createdAt: Date;
@@ -163,7 +169,10 @@ export interface MetadataStore {
   updateFile(id: string, expectedUpdatedAt: Date, patch: Partial<FileRecord>): Promise<FileRecord>;
   findFiles(query: {
     lifecycleStatus?: FileLifecycleStatus;
+    lifecycleStatuses?: readonly FileLifecycleStatus[];
     deletedBefore?: Date;
+    expiresBefore?: Date;
+    retentionMode?: FileRetentionMode;
     namespace?: string;
     limit: number;
   }): Promise<readonly FileRecord[]>;

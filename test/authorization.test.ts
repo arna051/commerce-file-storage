@@ -12,6 +12,7 @@ const base: FileRecord = {
   lifecycleStatus: 'available',
   scanStatus: 'not-required',
   processingStatus: 'not-required',
+  retention: { mode: 'permanent' },
   access: { mode: 'restricted', policyVersion: 1 },
   references: [],
   variants: [],

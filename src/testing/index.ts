@@ -32,12 +32,26 @@ export class MemoryMetadataStore implements MetadataStore {
   }
   async findFiles(query: {
     lifecycleStatus?: FileRecord['lifecycleStatus'];
+    lifecycleStatuses?: readonly FileRecord['lifecycleStatus'][];
     deletedBefore?: Date;
+    expiresBefore?: Date;
+    retentionMode?: FileRecord['retention']['mode'];
     namespace?: string;
     limit: number;
   }) {
     return [...this.files.values()]
       .filter((file) => !query.lifecycleStatus || file.lifecycleStatus === query.lifecycleStatus)
+      .filter(
+        (file) =>
+          !query.lifecycleStatuses || query.lifecycleStatuses.includes(file.lifecycleStatus),
+      )
+      .filter((file) => !query.retentionMode || file.retention.mode === query.retentionMode)
+      .filter(
+        (file) =>
+          !query.expiresBefore ||
+          (file.retention.mode === 'temporary' &&
+            file.retention.expiresAt.getTime() <= query.expiresBefore.getTime()),
+      )
       .filter((file) => !query.namespace || file.namespace === query.namespace)
       .filter(
         (file) =>

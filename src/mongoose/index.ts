@@ -34,6 +34,10 @@ function fileSchema() {
       lifecycleStatus: { type: String, required: true, index: true },
       scanStatus: { type: String, required: true, index: true },
       processingStatus: { type: String, required: true, index: true },
+      retention: {
+        mode: { type: String, required: true, default: 'permanent' },
+        expiresAt: Date,
+      },
       access: {
         mode: { type: String, required: true, index: true },
         owner: { type: { type: String }, id: { type: String } },
@@ -49,7 +53,9 @@ function fileSchema() {
       deletedAt: Date,
     },
     { versionKey: false, strict: 'throw' },
-  ).index({ namespace: 1, lifecycleStatus: 1, createdAt: -1 });
+  )
+    .index({ namespace: 1, lifecycleStatus: 1, createdAt: -1 })
+    .index({ 'retention.mode': 1, 'retention.expiresAt': 1, lifecycleStatus: 1 });
 }
 
 function uploadSchema() {
@@ -73,6 +79,10 @@ function uploadSchema() {
         mode: { type: String, required: true },
         owner: { type: { type: String }, id: { type: String } },
         policyVersion: { type: Number, required: true },
+      },
+      retention: {
+        mode: { type: String, required: true, default: 'permanent' },
+        expiresAt: Date,
       },
       parts: [
         { _id: false, partNumber: Number, etag: String, size: Number, checksumSha256: String },
@@ -107,6 +117,11 @@ function plain<T>(value: unknown): T {
   const output = record.toObject ? record.toObject() : value;
   const rest = { ...(output as Record<string, unknown>) };
   delete rest._id;
+  if (
+    !rest.retention &&
+    (typeof rest.lifecycleStatus === 'string' || typeof rest.providerUploadId === 'string')
+  )
+    rest.retention = { mode: 'permanent' };
   return rest as T;
 }
 
@@ -165,13 +180,19 @@ export class MongooseMetadataStore implements MetadataStore {
   }
   async findFiles(query: {
     lifecycleStatus?: FileRecord['lifecycleStatus'];
+    lifecycleStatuses?: readonly FileRecord['lifecycleStatus'][];
     deletedBefore?: Date;
+    expiresBefore?: Date;
+    retentionMode?: FileRecord['retention']['mode'];
     namespace?: string;
     limit: number;
   }) {
     const filter: Record<string, unknown> = {};
     if (query.lifecycleStatus) filter.lifecycleStatus = query.lifecycleStatus;
+    if (query.lifecycleStatuses) filter.lifecycleStatus = { $in: query.lifecycleStatuses };
     if (query.deletedBefore) filter.deletedAt = { $lte: query.deletedBefore };
+    if (query.expiresBefore) filter['retention.expiresAt'] = { $lte: query.expiresBefore };
+    if (query.retentionMode) filter['retention.mode'] = query.retentionMode;
     if (query.namespace) filter.namespace = query.namespace;
     const values = await this.fileModel
       .find(filter)

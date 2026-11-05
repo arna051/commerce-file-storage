@@ -82,4 +82,30 @@ describe.skipIf(!enabled)('MongooseMetadataStore integration', () => {
       await metadata.listExpiredUploads(new Date(Date.now() + 2 * 24 * 60 * 60 * 1000), 10),
     ).toHaveLength(1);
   });
+
+  it('queries and safely removes expired temporary files', async () => {
+    const provider = new MemoryBlobProvider();
+    const now = new Date('2026-01-10T00:00:00.000Z');
+    const storage = createFileStorage({
+      provider,
+      metadata,
+      now: () => now,
+      logger: { debug() {}, info() {}, warn() {}, error() {} },
+    });
+    const bytes = Buffer.from([0xff, 0xd8, 0xff, 1]);
+    const file = await storage.upload({
+      namespace: 'business/temporary',
+      stream: Readable.from(bytes),
+      contentType: 'image/jpeg',
+      contentLength: bytes.length,
+      retention: { mode: 'temporary', expiresAt: new Date('2026-01-09T00:00:00.000Z') },
+    });
+    expect(await storage.cleanupExpiredTemporaryFiles()).toEqual({
+      examined: 1,
+      deleted: 1,
+      failed: 0,
+    });
+    expect((await metadata.getFile(file.id))?.lifecycleStatus).toBe('permanently-deleted');
+    expect(await provider.head(file.objectKey)).toBeNull();
+  });
 });
